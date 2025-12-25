@@ -1,5 +1,14 @@
+import json
+import os
+import re
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
+
+import sys
+
+# vtl_apiへのパスを通す
+sys.path.append(os.path.join(os.path.dirname(__file__), "../vtl_api"))
+from vtl_api import VocalTractLab
 
 
 class VTLUtterance:
@@ -296,32 +305,224 @@ class VTLUtterance:
         except Exception as e:
             print(f"Error saving .ges file: {e}")
 
+    def ling_to_seg(self):
+        self.segments = []
+        for block in self.linguistic_blocks:
+            context = block.get("context", {})
+            lang = context.get("lang", "unknown")
+            content = block.get("content", "")
+            baseline = block.get("baseline", {})
+            tempo = float(baseline.get("tempo", 120))
+
+            if lang == "jp":
+                parser = JPParser()
+                segments = parser.parse_to_segments(content, tempo)
+                self.segments.extend(segments)
+            else:
+                print(f"Unsupported language: {lang}")
+
+        print(f"Generated {len(self.segments)} segments from linguistic score.")
+
+    def ling_to_ges(self, ling_file: str, ges_file: str, speaker_file: str):
+        """
+        .lingファイルを読み込み、.segを経由して.gesファイルを作成する
+        """
+        # 1. .lingを読み込む
+        self.load_ling(ling_file)
+
+        # 2. .segに変換 (内部データ self.segments を更新)
+        self.ling_to_seg()
+
+        # 3. 一時的な.segファイルとして保存
+        # .gesファイルと同じディレクトリ、同じベース名で拡張子だけ.segにする
+        seg_file = os.path.splitext(ges_file)[0] + ".seg"
+        self.save_seg(seg_file)
+
+        # 4. VTL APIを使って.seg -> .ges変換
+        try:
+            with VocalTractLab(speaker_file) as vtl:
+                vtl.seg_to_ges(seg_file, ges_file)
+            print(f"Successfully converted to {ges_file}")
+
+            # 5. 生成された.gesを読み込む (オプション)
+            self.load_ges(ges_file)
+
+        except Exception as e:
+            print(f"Error converting ling to ges: {e}")
+            import traceback
+
+            traceback.print_exc()
+
+    def ges_to_wav(self, ges_file: str, wav_file: str, speaker_file: str):
+        """
+        .gesファイルを読み込み、.tractを経由して.wavファイルを作成する
+        """
+        # 1. .tractファイルのパスを決定
+        tract_file = os.path.splitext(wav_file)[0] + ".tract"
+
+        # 2. VTL APIを使って変換
+        try:
+            with VocalTractLab(speaker_file) as vtl:
+                # .ges -> .tract
+                vtl.ges_to_tract(ges_file, tract_file)
+                print(f"Successfully converted to {tract_file}")
+
+                # .tract -> .wav
+                vtl.tract_to_audio(tract_file, wav_file)
+                print(f"Successfully converted to {wav_file}")
+
+        except Exception as e:
+            print(f"Error converting ges to wav: {e}")
+            import traceback
+
+            traceback.print_exc()
+
+    def ling_to_wav(self, ling_file: str, wav_file: str, speaker_file: str):
+        """
+        .lingファイルを読み込み、.seg, .ges, .tractを経由して.wavファイルを作成する
+        """
+        # 1. .gesファイルのパスを決定
+        ges_file = os.path.splitext(wav_file)[0] + ".ges"
+
+        # 2. .ling -> .ges
+        self.ling_to_ges(ling_file, ges_file, speaker_file)
+
+        # 3. .ges -> .wav
+        self.ges_to_wav(ges_file, wav_file, speaker_file)
+
 
 class JPParser:
-    def __init__(self, data):
-        self.data = data
-        self.parse(data)
+    def __init__(self):
+        self.base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        self.kana_map = self._load_json(
+            os.path.join(self.base_dir, "ref", "VTL_API", "kana_map.json")
+        )
+        self.phoneme_durations = self._load_json(
+            os.path.join(self.base_dir, "ref", "phoneme_durations.json")
+        )
 
-    def parse(self, data):
-        context = data.get("context", {})
-        self.lang = context.get("lang", "unknown")
-        self.type = context.get("type", "unknown")
+    def _load_json(self, path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Error loading {path}: {e}")
+            return {}
 
-        if self.lang != "jp":
-            raise ValueError(f"Unsupported language for JPParser: {self.lang}")
+    def parse_to_segments(self, text, bpm):
+        """
+        Parse Japanese text into segments with durations.
+        """
+        moras = self._parse_text_to_moras(text)
+        return self._generate_segments(moras, bpm)
 
-        content = data.get("content", "")
-        gesture_tiers = VTLUtterance.gesture_tiers_template()
+    def _parse_text_to_moras(self, text):
+        """
+        Parse Japanese text into a list of moras (list of phonemes).
+        """
+        # Remove @devoc{...} wrapper
+        text = re.sub(r"@devoc\{([^}]+)\}", r"\1", text)
 
-        return gesture_tiers
+        # Remove whitespace
+        text = text.replace(" ", "").replace("　", "")
+
+        moras = []
+        i = 0
+        while i < len(text):
+            if text[i] == "/":
+                moras.append(["PAUSE"])
+                i += 1
+                continue
+
+            # Try to match longest key in lt2mora
+            matched = False
+
+            # Check 2 chars (e.g. きゃ)kana_map
+            matched = False
+
+            # Check 2 chars (e.g. きゃ)
+            if i + 1 < len(text):
+                sub = text[i : i + 2]
+                if sub in self.kana_map:
+                    moras.append(self.kana_map[sub])
+                    i += 2
+                    matched = True
+                    continue
+
+            # Check 1 char
+            sub = text[i]
+            if sub in self.kana_map:
+                moras.append(self.kana_map[sub])
+                i += 1
+                matched = True
+                continue
+            print(f"Warning: Unknown character '{sub}' at index {i}")
+            i += 1
+
+        return moras
+
+    def _generate_segments(self, moras, bpm):
+        """
+        Convert moras to segments with durations.
+        """
+        duration_per_mora = 60.0 / bpm
+        segments = []
+
+        # Add initial silence
+        segments.append({"name": "", "duration_s": 0.5})
+
+        for mora in moras:
+            if mora == ["PAUSE"]:
+                # Pause duration (e.g. 1 mora or more)
+                segments.append({"name": "", "duration_s": duration_per_mora})
+                continue
+
+            # Calculate duration for each phoneme in the mora
+            duration_phs = [None] * len(mora)
+
+            # Assign fixed durations for consonants
+            for i, ph in enumerate(mora):
+                if ph in self.phoneme_durations and len(mora) > 1:
+                    duration_phs[i] = self.phoneme_durations.get(ph, 0.060)
+
+            # Calculate remaining time for vowels
+            fixed_duration = sum([d for d in duration_phs if d is not None])
+            remaining_duration = duration_per_mora - fixed_duration
+
+            if remaining_duration < 0:
+                remaining_duration = 0.010  # Minimum duration
+
+            # Distribute remaining duration among undefined phonemes (usually vowels)
+            undefined_count = duration_phs.count(None)
+            if undefined_count > 0:
+                val = remaining_duration / undefined_count
+                for i in range(len(duration_phs)):
+                    if duration_phs[i] is None:
+                        duration_phs[i] = val
+
+            # Create segments
+            for ph, dur in zip(mora, duration_phs):
+                segments.append({"name": ph, "duration_s": dur})
+
+        # Add final silence
+        segments.append({"name": "", "duration_s": 0.5})
+
+        return segments
 
 
 if __name__ == "__main__":
     # テストコード
     utterance = VTLUtterance()
-    ling = utterance.load_ling("../examples/konnichiwa.ling")
-    print(utterance.linguistic_blocks)
-    utterance.save_ling("../examples/konnichiwa_out.ling")
-    ges = utterance.load_ges("../examples/konnichiwa.ges")
-    print(utterance.gesture_tiers)
-    utterance.save_ges("../examples/konnichiwa_out.ges")
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    ling_path = os.path.join(base_dir, "examples", "konnichiwa.ling")
+    wav_out_path = os.path.join(base_dir, "examples", "konnichiwa_out.wav")
+
+    # スピーカーファイルのパス (環境に合わせて調整してください)
+    speaker_path = os.path.join(
+        base_dir, "vtl_gui", "speakers", "降久嘉音_alpha.speaker"
+    )
+    if not os.path.exists(speaker_path):
+        speaker_path = os.path.join(base_dir, "vtl_gui", "speakers", "JD2.speaker")
+
+    print(f"Converting {ling_path} to {wav_out_path} using {speaker_path}")
+    utterance.ling_to_wav(ling_path, wav_out_path, speaker_path)

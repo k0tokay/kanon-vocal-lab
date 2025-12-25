@@ -61,6 +61,57 @@ class VocalTractLab:
         self.lib.vtlClose.argtypes = []
         self.lib.vtlClose.restype = None
 
+    def seg_to_ges(self, seg_file: str, ges_file: str) -> int:
+        """
+        .segファイルを.gesファイルに変換する
+        """
+        if not os.path.exists(seg_file):
+            raise FileNotFoundError(f"Segment file not found: {seg_file}")
+
+        seg_str = str(seg_file)
+        ges_str = str(ges_file)
+
+        if sys.platform == "win32":
+            seg_bytes = seg_str.encode("mbcs")
+            ges_bytes = ges_str.encode("mbcs")
+        else:
+            seg_bytes = seg_str.encode("utf-8")
+            ges_bytes = ges_str.encode("utf-8")
+
+        return self.lib.vtlSegmentSequenceToGesturalScore(seg_bytes, ges_bytes)
+
+    def ges_to_tract(self, ges_file: str, tract_file: str) -> int:
+        """
+        .gesファイルをTract Sequenceファイルに変換する
+        """
+        ges_str = str(ges_file)
+        tract_str = str(tract_file)
+
+        if sys.platform == "win32":
+            ges_bytes = ges_str.encode("mbcs")
+            tract_bytes = tract_str.encode("mbcs")
+        else:
+            ges_bytes = ges_str.encode("utf-8")
+            tract_bytes = tract_str.encode("utf-8")
+
+        return self.lib.vtlGesturalScoreToTractSequence(ges_bytes, tract_bytes)
+
+    def tract_to_audio(self, tract_file: str, audio_file: str) -> int:
+        """
+        Tract Sequenceファイルを音声ファイル(.wav)に変換する
+        """
+        tract_str = str(tract_file)
+        audio_str = str(audio_file)
+
+        if sys.platform == "win32":
+            tract_bytes = tract_str.encode("mbcs")
+            audio_bytes = audio_str.encode("mbcs")
+        else:
+            tract_bytes = tract_str.encode("utf-8")
+            audio_bytes = audio_str.encode("utf-8")
+
+        return self.lib.vtlTractSequenceToAudio(tract_bytes, audio_bytes, None, None)
+
     def __enter__(self):
         """with構文の開始時に初期化"""
         if not os.path.exists(self.speaker_file):
