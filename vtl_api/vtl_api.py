@@ -5,8 +5,11 @@ from pathlib import Path
 
 
 class VocalTractLab:
-    def __init__(self, speaker_file: str, lib_path: str = None):
+    def __init__(self, speaker_file: str = None, lib_path: str = None):
         self.lib = self._load_library(lib_path)
+        if speaker_file is None:
+            default_speaker = Path(__file__).parent.parent / "speakers" / "JD2.speaker"
+            speaker_file = str(default_speaker)
         self.speaker_file = speaker_file
         self._setup_signatures()
 

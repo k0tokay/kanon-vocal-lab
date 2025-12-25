@@ -3,6 +3,7 @@ import os
 import re
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
+import numpy as np
 
 import sys
 
@@ -312,46 +313,100 @@ class VTLUtterance:
             lang = context.get("lang", "unknown")
             content = block.get("content", "")
             baseline = block.get("baseline", {})
-            tempo = float(baseline.get("tempo", 120))
+            tempo = float(baseline.get("tempo", 100))
+            f0 = float(baseline.get("f0", 250))
 
             if lang == "jp":
                 parser = JPParser()
-                segments = parser.parse_to_segments(content, tempo)
+                segments = parser.parse_to_segments(content, tempo, f0)
                 self.segments.extend(segments)
             else:
                 print(f"Unsupported language: {lang}")
 
         print(f"Generated {len(self.segments)} segments from linguistic score.")
 
-    def ling_to_ges(self, ling_file: str, ges_file: str, speaker_file: str):
-        """
-        .lingファイルを読み込み、.segを経由して.gesファイルを作成する
-        """
-        # 1. .lingを読み込む
-        self.load_ling(ling_file)
+    def _preprocess_s2g(self, seg_data=None):
+        if seg_data is None:
+            seg_data = self.segments
 
-        # 2. .segに変換 (内部データ self.segments を更新)
-        self.ling_to_seg()
+        # 母音の処理
+        replace_map = {"M": "u"}
+        tmp_segments = []
+        for seg in seg_data:
+            seg_copy = seg.copy()
+            if seg_copy.get("name") in replace_map:
+                seg_copy["name"] = replace_map[seg_copy["name"]]
+            tmp_segments.append(seg_copy)
 
-        # 3. 一時的な.segファイルとして保存
-        # .gesファイルと同じディレクトリ、同じベース名で拡張子だけ.segにする
+        return tmp_segments
+
+    def _postprocess_s2g(self, ges_data=None):
+        if ges_data is None:
+            ges_data = self.gesture_tiers
+
+        # 母音の処理を元に戻す
+        reverse_map = {"u": "M"}
+        vowel_gestures = ges_data.get("vowel-gestures", {}).get("gestures", [])
+        for g in vowel_gestures:
+            if g.get("value") in reverse_map:
+                g["value"] = reverse_map[g["value"]]
+
+        return ges_data
+
+    def _f0_gestures_s2g(self, seg_data=None):
+        if seg_data is None:
+            seg_data = self.segments
+
+        f0_gestures = []
+        current_time = 0.0
+
+        for seg in seg_data:
+            if "f0" not in seg:
+                continue
+            duration = float(seg.get("duration_s", 0.0))
+            f0_value = float(seg.get("f0", 0.0))
+            f0_value_st = np.log2(f0_value) * 12  # st単位に変換
+            gesture = {
+                "value": f0_value_st,
+                "slope": 0.0,
+                "duration_s": duration,
+                "time_constant_s": 0.015,
+                "neutral": False,
+            }
+            f0_gestures.append(gesture)
+            current_time += duration
+
+        return f0_gestures
+
+    def seg_to_ges(self, ges_file: str, speaker_file: str = None):
+        f0_gestures = self._f0_gestures_s2g()
+        tmp_segments = self._preprocess_s2g()
         seg_file = os.path.splitext(ges_file)[0] + ".seg"
-        self.save_seg(seg_file)
+        self.save_seg(seg_file, data=tmp_segments)
 
-        # 4. VTL APIを使って.seg -> .ges変換
         try:
-            with VocalTractLab(speaker_file) as vtl:
+            with VocalTractLab() as vtl:
                 vtl.seg_to_ges(seg_file, ges_file)
             print(f"Successfully converted to {ges_file}")
 
-            # 5. 生成された.gesを読み込む (オプション)
             self.load_ges(ges_file)
+            ges_data = self._postprocess_s2g()
+            ges_data["f0-gestures"]["gestures"] = f0_gestures
 
+            self.save_ges(ges_file, data=ges_data)
         except Exception as e:
-            print(f"Error converting ling to ges: {e}")
+            print(f"Error converting seg to ges: {e}")
             import traceback
 
             traceback.print_exc()
+
+    def ling_to_ges(self, ling_file: str, ges_file: str, speaker_file: str = None):
+        """
+        .lingファイルを読み込み、.segを経由して.gesファイルを作成する
+        """
+        self.load_ling(ling_file)
+        self.ling_to_seg()
+        self.seg_to_ges(ges_file, speaker_file)
 
     def ges_to_wav(self, ges_file: str, wav_file: str, speaker_file: str):
         """
@@ -393,12 +448,10 @@ class VTLUtterance:
 
 class JPParser:
     def __init__(self):
-        self.base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        self.kana_map = self._load_json(
-            os.path.join(self.base_dir, "ref", "VTL_API", "kana_map.json")
-        )
+        self.base_dir = os.path.dirname(os.path.abspath(__file__))
+        self.kana_map = self._load_json(os.path.join(self.base_dir, "kana_map.json"))
         self.phoneme_durations = self._load_json(
-            os.path.join(self.base_dir, "ref", "phoneme_durations.json")
+            os.path.join(self.base_dir, "phoneme_durations.json")
         )
 
     def _load_json(self, path):
@@ -409,12 +462,13 @@ class JPParser:
             print(f"Error loading {path}: {e}")
             return {}
 
-    def parse_to_segments(self, text, bpm):
+    def parse_to_segments(self, text, bpm, f0):
         """
         Parse Japanese text into segments with durations.
         """
         moras = self._parse_text_to_moras(text)
-        return self._generate_segments(moras, bpm)
+        segments = self._generate_segments(moras, bpm, f0)
+        return segments
 
     def _parse_text_to_moras(self, text):
         """
@@ -429,60 +483,106 @@ class JPParser:
         moras = []
         i = 0
         while i < len(text):
-            if text[i] == "/":
-                moras.append(["PAUSE"])
+            char = text[i]
+
+            if char == "'":
+                if moras and not moras[-1].get("pause"):
+                    moras[-1]["accent"] = True
                 i += 1
                 continue
 
-            # Try to match longest key in lt2mora
-            matched = False
+            if char == ",":
+                if moras and not moras[-1].get("pause"):
+                    moras[-1]["word_break"] = True
+                i += 1
+                continue
 
-            # Check 2 chars (e.g. きゃ)kana_map
-            matched = False
+            if char == "/":
+                if moras and not moras[-1].get("pause"):
+                    moras[-1]["phrase_break"] = True
 
-            # Check 2 chars (e.g. きゃ)
+                moras.append({"phonemes": ["PAUSE"], "pause": True, "accent": False})
+                i += 1
+                continue
+
             if i + 1 < len(text):
                 sub = text[i : i + 2]
                 if sub in self.kana_map:
-                    moras.append(self.kana_map[sub])
+                    moras.append(
+                        {
+                            "phonemes": self.kana_map[sub],
+                            "pause": False,
+                            "accent": False,
+                            "word_break": False,
+                            "phrase_break": False,
+                        }
+                    )
                     i += 2
-                    matched = True
                     continue
 
             # Check 1 char
             sub = text[i]
             if sub in self.kana_map:
-                moras.append(self.kana_map[sub])
+                moras.append(
+                    {
+                        "phonemes": self.kana_map[sub],
+                        "pause": False,
+                        "accent": False,
+                        "word_break": False,
+                        "phrase_break": False,
+                    }
+                )
                 i += 1
-                matched = True
                 continue
             print(f"Warning: Unknown character '{sub}' at index {i}")
             i += 1
 
         return moras
 
-    def _generate_segments(self, moras, bpm):
+    def _generate_segments(self, moras, bpm, f0):
         """
         Convert moras to segments with durations.
         """
-        duration_per_mora = 60.0 / bpm
+        duration_per_mora = 60.0 / bpm / 4  # mora1個は4分音符分とする
         segments = []
 
-        # Add initial silence
-        segments.append({"name": "", "duration_s": 0.5})
+        # イントネーションを計算する
+        T = 3  # [st]
+        A1 = 7  # [st]
+        A2 = 6  # [st]
+        f0_phrase_values = []
+        pitch_HL = []
+        beta = 0.05
+        start_of_phrase = True
+        start_of_word = True
+        is_second_mora = False
+        after_accent = False
 
-        for mora in moras:
-            if mora == ["PAUSE"]:
+        # Add initial silence
+        segments.append({"name": "?", "duration_s": 0.5, "f0": f0})
+
+        for mora_data in moras:
+            phonemes = mora_data["phonemes"]
+
+            if mora_data.get("pause"):
                 # Pause duration (e.g. 1 mora or more)
-                segments.append({"name": "", "duration_s": duration_per_mora})
+                segments.append(
+                    {
+                        "name": "?",
+                        "duration_s": duration_per_mora,
+                        "f0": f0_phrase_values[-1],
+                    }
+                )
+                f0_phrase_values.append(f0)
+                pitch_HL.append(0)
                 continue
 
             # Calculate duration for each phoneme in the mora
-            duration_phs = [None] * len(mora)
+            duration_phs = [None] * len(phonemes)
 
             # Assign fixed durations for consonants
-            for i, ph in enumerate(mora):
-                if ph in self.phoneme_durations and len(mora) > 1:
+            for i, ph in enumerate(phonemes):
+                if ph in self.phoneme_durations and len(phonemes) > 1:
                     duration_phs[i] = self.phoneme_durations.get(ph, 0.060)
 
             # Calculate remaining time for vowels
@@ -500,12 +600,59 @@ class JPParser:
                     if duration_phs[i] is None:
                         duration_phs[i] = val
 
+            # F0 calculation
+            # Phrase level
+            if start_of_phrase:
+                f0_phrase = f0 * np.power(2, T / 12)
+                A = A1
+                start_of_phrase = False
+            else:
+                f0_last = f0_phrase_values[-1]
+                f0_phrase = f0_last * (1 - beta) + f0 * beta
+                A = A2
+
+            f0_phrase_values.append(f0_phrase)
+
+            # Accent level
+            if mora_data.get("accent", False):
+                after_accent = True
+                pitch_HL.append(1)
+            elif start_of_word:
+                pitch_HL.append(1 if mora_data.get("accent", False) else 0.5)
+                start_of_word = False
+                is_second_mora = True
+            elif is_second_mora:
+                pitch_HL.append(0 if pitch_HL[-1] > 0.5 else 1)
+                is_second_mora = False
+            elif after_accent:
+                pitch_HL.append(0)
+                after_accent = False
+            else:
+                pitch_HL.append(pitch_HL[-1])
+
+            if mora_data.get("word_break", False):
+                start_of_word = True
+            if mora_data.get("phrase_break", False):
+                start_of_phrase = True
+
             # Create segments
-            for ph, dur in zip(mora, duration_phs):
-                segments.append({"name": ph, "duration_s": dur})
+            for ph, dur in zip(phonemes, duration_phs):
+                seg = {"name": ph, "duration_s": dur}
+                for key in mora_data.keys():
+                    if key not in ["phonemes", "pause"]:
+                        seg[key] = mora_data[key]
+                f0_update = f0_phrase * np.power(2, (A / 12) * pitch_HL[-1])
+                seg["f0"] = f0_update
+                print(
+                    f"Phoneme: {ph}, Duration: {dur:.3f}, F0: {seg['f0']:.2f}, HL: {pitch_HL[-1]}, Accent: {mora_data.get('accent', False)}"
+                )
+                segments.append(seg)
+
+                if segments[-1]["name"] == "[PAUSE]":
+                    segments[-1]["f0"] = f0_update
 
         # Add final silence
-        segments.append({"name": "", "duration_s": 0.5})
+        segments.append({"name": "?", "duration_s": 0.5, "f0": f0_phrase_values[-1]})
 
         return segments
 
