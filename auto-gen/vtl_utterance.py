@@ -573,41 +573,44 @@ class JPParser:
             # このフレーズ内のモーラ（PAUSE除く）を抽出
             content_moras = [m for m in phrase if not m.get("pause")]
 
-            # アクセント位置の特定
-            # accent=True となっているモーラがアクセント核（下がるところの直前）
-            accent_index = -1
-            for j, m in enumerate(content_moras):
-                if m.get("accent"):
-                    accent_index = j
-                    break
+            # フレーズを単語に分割
+            accent_phrases = []
+            current_accent_phrase = []
+            for m in content_moras:
+                current_accent_phrase.append(m)
+                if m.get("word_break"):
+                    accent_phrases.append(current_accent_phrase)
+                    current_accent_phrase = []
+            if current_accent_phrase:
+                accent_phrases.append(current_accent_phrase)
 
-            # High/Low パターンの生成
-            # 0: Low, 1: High
-            hl_pattern = [0] * len(content_moras)
+            # 各アクセント句(?)ごとにHLパターンを生成して結合
+            hl_pattern = []
+            for word_moras in accent_phrases:
+                # アクセント位置特定
+                accent_idx = -1
+                for j, m in enumerate(word_moras):
+                    if m.get("accent"):
+                        accent_idx = j
+                        break
 
-            if content_moras:
-                if accent_index == 0:
-                    # 頭高型: H L L ...
-                    hl_pattern[0] = 1
-                    # 残りは0 (Low)
-                else:
-                    # 平板 or 中高 or 尾高
-                    # 1モーラ目はLow, 2モーラ目からアクセント核までHigh
-                    hl_pattern[0] = 0
-
-                    # 2モーラ目以降の処理
-                    limit = (
-                        accent_index if accent_index != -1 else len(content_moras) - 1
-                    )
-
-                    for j in range(1, len(content_moras)):
-                        if j <= limit:
-                            hl_pattern[j] = 1
-                        else:
-                            hl_pattern[j] = 0
+                word_hl = [0] * len(word_moras)
+                if word_moras:
+                    if accent_idx == 0:  # 頭高型: H L L ...
+                        word_hl[0] = 1
+                        # 残りは0
+                    else:  # 平板・中高・尾高: L H H ... (L)
+                        word_hl[0] = 0
+                        limit = accent_idx if accent_idx != -1 else len(word_moras) - 1
+                        for k in range(1, len(word_moras)):
+                            if k <= limit:
+                                word_hl[k] = 1
+                            else:
+                                word_hl[k] = 0
+                hl_pattern.extend(word_hl)
 
             # 次のフレーズの先頭F0を決定する（ポーズ用）
-            next_phrase_start_f0 = f0_low
+            next_phrase_start_f0 = f0
             if i + 1 < len(phrases):
                 next_phrase = phrases[i + 1]
                 next_content_moras = [m for m in next_phrase if not m.get("pause")]
@@ -619,9 +622,9 @@ class JPParser:
                             break
                     # 頭高型ならHighスタート、それ以外はLowスタート
                     if next_accent_index == 0:
-                        next_phrase_start_f0 = f0_high
+                        next_phrase_start_f0 = f0 * np.power(2, 6.0 / 12)
                     else:
-                        next_phrase_start_f0 = f0_low
+                        next_phrase_start_f0 = f0
 
             # 各モーラへのF0割り当てとセグメント生成
             content_mora_idx = 0
@@ -666,9 +669,34 @@ class JPParser:
                             duration_phs[i] = val
 
                 # Determine F0 for this mora
+                # フレーズ全体の下降 (Declination): 1モーラあたり -0.2 semitones
+                declination_st = -0.7 * content_mora_idx
+                baseline_f0 = f0 * np.power(2, declination_st / 12)
+
+                # アクセントの重畳: Highなら +6.0 semitones
                 is_high = hl_pattern[content_mora_idx] == 1
-                target_f0 = f0_high if is_high else f0_low
+                accent_lift_st = 6.0 if is_high else 0.0
+
+                target_f0 = baseline_f0 * np.power(2, accent_lift_st / 12)
                 content_mora_idx += 1
+
+                # 母音のみの音節が単語頭に来る場合、短いポーズを挿入
+                if (
+                    is_next_mora_start_of_word
+                    and len(phonemes) == 1
+                    and phonemes[0] in ["a", "i", "M", "e", "o"]
+                ):
+                    segments.append(
+                        {
+                            "name": "?",
+                            "duration_s": 0.060,
+                            "f0": target_f0,
+                        }
+                    )
+                    # 短いポーズ分だけ母音の長さを短くする
+                    duration_phs = [
+                        d - 0.060 if d is not None else None for d in duration_phs
+                    ]
 
                 # Create segments
                 for i, (ph, dur) in enumerate(zip(phonemes, duration_phs)):
