@@ -370,7 +370,7 @@ class VTLUtterance:
                 "value": f0_value_st,
                 "slope": 0.0,
                 "duration_s": duration,
-                "time_constant_s": 0.015,
+                "time_constant_s": 0.010,
                 "neutral": False,
             }
             f0_gestures.append(gesture)
@@ -546,113 +546,151 @@ class JPParser:
         duration_per_mora = 60.0 / bpm / 4  # mora1個は4分音符分とする
         segments = []
 
-        # イントネーションを計算する
-        T = 3  # [st]
-        A1 = 7  # [st]
-        A2 = 6  # [st]
-        f0_phrase_values = []
-        pitch_HL = []
-        beta = 0.05
-        start_of_phrase = True
-        start_of_word = True
-        is_second_mora = False
-        after_accent = False
+        # イントネーションパラメータ
+        # フレーズごとに最高音(High)と最低音(Low)を一定にする
+        # 基準f0に対して、Highは +6 semitones, Lowは 0 semitones (基準値) とする例
+        high_st = 6.0
+        low_st = 0.0
 
-        # Add initial silence
-        segments.append({"name": "?", "duration_s": 0.5, "f0": f0})
+        f0_high = f0 * np.power(2, high_st / 12)
+        f0_low = f0 * np.power(2, low_st / 12)
 
-        for mora_data in moras:
-            phonemes = mora_data["phonemes"]
+        # モーラをフレーズごとに分割する
+        phrases = []
+        current_phrase = []
+        for mora in moras:
+            current_phrase.append(mora)
+            # フレーズ切れ目判定: PAUSE または phrase_breakフラグ
+            if mora.get("pause") or mora.get("phrase_break"):
+                phrases.append(current_phrase)
+                current_phrase = []
 
-            if mora_data.get("pause"):
-                # Pause duration (e.g. 1 mora or more)
-                segments.append(
-                    {
-                        "name": "?",
-                        "duration_s": duration_per_mora,
-                        "f0": f0_phrase_values[-1],
-                    }
-                )
-                f0_phrase_values.append(f0)
-                pitch_HL.append(0)
-                continue
+        if current_phrase:
+            phrases.append(current_phrase)
 
-            # Calculate duration for each phoneme in the mora
-            duration_phs = [None] * len(phonemes)
+        # フレーズごとに処理
+        for i, phrase in enumerate(phrases):
+            # このフレーズ内のモーラ（PAUSE除く）を抽出
+            content_moras = [m for m in phrase if not m.get("pause")]
 
-            # Assign fixed durations for consonants
-            for i, ph in enumerate(phonemes):
-                if ph in self.phoneme_durations and len(phonemes) > 1:
-                    duration_phs[i] = self.phoneme_durations.get(ph, 0.060)
+            # アクセント位置の特定
+            # accent=True となっているモーラがアクセント核（下がるところの直前）
+            accent_index = -1
+            for j, m in enumerate(content_moras):
+                if m.get("accent"):
+                    accent_index = j
+                    break
 
-            # Calculate remaining time for vowels
-            fixed_duration = sum([d for d in duration_phs if d is not None])
-            remaining_duration = duration_per_mora - fixed_duration
+            # High/Low パターンの生成
+            # 0: Low, 1: High
+            hl_pattern = [0] * len(content_moras)
 
-            if remaining_duration < 0:
-                remaining_duration = 0.010  # Minimum duration
+            if content_moras:
+                if accent_index == 0:
+                    # 頭高型: H L L ...
+                    hl_pattern[0] = 1
+                    # 残りは0 (Low)
+                else:
+                    # 平板 or 中高 or 尾高
+                    # 1モーラ目はLow, 2モーラ目からアクセント核までHigh
+                    hl_pattern[0] = 0
 
-            # Distribute remaining duration among undefined phonemes (usually vowels)
-            undefined_count = duration_phs.count(None)
-            if undefined_count > 0:
-                val = remaining_duration / undefined_count
-                for i in range(len(duration_phs)):
-                    if duration_phs[i] is None:
-                        duration_phs[i] = val
+                    # 2モーラ目以降の処理
+                    limit = (
+                        accent_index if accent_index != -1 else len(content_moras) - 1
+                    )
 
-            # F0 calculation
-            # Phrase level
-            if start_of_phrase:
-                f0_phrase = f0 * np.power(2, T / 12)
-                A = A1
-                start_of_phrase = False
-            else:
-                f0_last = f0_phrase_values[-1]
-                f0_phrase = f0_last * (1 - beta) + f0 * beta
-                A = A2
+                    for j in range(1, len(content_moras)):
+                        if j <= limit:
+                            hl_pattern[j] = 1
+                        else:
+                            hl_pattern[j] = 0
 
-            f0_phrase_values.append(f0_phrase)
+            # 次のフレーズの先頭F0を決定する（ポーズ用）
+            next_phrase_start_f0 = f0_low
+            if i + 1 < len(phrases):
+                next_phrase = phrases[i + 1]
+                next_content_moras = [m for m in next_phrase if not m.get("pause")]
+                if next_content_moras:
+                    next_accent_index = -1
+                    for j, m in enumerate(next_content_moras):
+                        if m.get("accent"):
+                            next_accent_index = j
+                            break
+                    # 頭高型ならHighスタート、それ以外はLowスタート
+                    if next_accent_index == 0:
+                        next_phrase_start_f0 = f0_high
+                    else:
+                        next_phrase_start_f0 = f0_low
 
-            # Accent level
-            if mora_data.get("accent", False):
-                after_accent = True
-                pitch_HL.append(1)
-            elif start_of_word:
-                pitch_HL.append(1 if mora_data.get("accent", False) else 0.5)
-                start_of_word = False
-                is_second_mora = True
-            elif is_second_mora:
-                pitch_HL.append(0 if pitch_HL[-1] > 0.5 else 1)
-                is_second_mora = False
-            elif after_accent:
-                pitch_HL.append(0)
-                after_accent = False
-            else:
-                pitch_HL.append(pitch_HL[-1])
+            # 各モーラへのF0割り当てとセグメント生成
+            content_mora_idx = 0
+            is_next_mora_start_of_word = True
 
-            if mora_data.get("word_break", False):
-                start_of_word = True
-            if mora_data.get("phrase_break", False):
-                start_of_phrase = True
+            for mora in phrase:
+                phonemes = mora["phonemes"]
 
-            # Create segments
-            for ph, dur in zip(phonemes, duration_phs):
-                seg = {"name": ph, "duration_s": dur}
-                for key in mora_data.keys():
-                    if key not in ["phonemes", "pause"]:
-                        seg[key] = mora_data[key]
-                f0_update = f0_phrase * np.power(2, (A / 12) * pitch_HL[-1])
-                seg["f0"] = f0_update
-                print(
-                    f"Phoneme: {ph}, Duration: {dur:.3f}, F0: {seg['f0']:.2f}, HL: {pitch_HL[-1]}, Accent: {mora_data.get('accent', False)}"
-                )
-                segments.append(seg)
+                if mora.get("pause"):
+                    # Pause
+                    segments.append(
+                        {
+                            "name": "?",
+                            "duration_s": duration_per_mora,
+                            "f0": next_phrase_start_f0,
+                        }
+                    )
+                    is_next_mora_start_of_word = True
+                    continue
 
-                if segments[-1]["name"] == "[PAUSE]":
-                    segments[-1]["f0"] = f0_update
+                # Calculate duration for each phoneme in the mora
+                duration_phs = [None] * len(phonemes)
+
+                # Assign fixed durations for consonants
+                for i, ph in enumerate(phonemes):
+                    if ph in self.phoneme_durations and len(phonemes) > 1:
+                        duration_phs[i] = self.phoneme_durations.get(ph, 0.060)
+
+                # Calculate remaining time for vowels
+                fixed_duration = sum([d for d in duration_phs if d is not None])
+                remaining_duration = duration_per_mora - fixed_duration
+
+                if remaining_duration < 0:
+                    remaining_duration = 0.010  # Minimum duration
+
+                # Distribute remaining duration among undefined phonemes (usually vowels)
+                undefined_count = duration_phs.count(None)
+                if undefined_count > 0:
+                    val = remaining_duration / undefined_count
+                    for i in range(len(duration_phs)):
+                        if duration_phs[i] is None:
+                            duration_phs[i] = val
+
+                # Determine F0 for this mora
+                is_high = hl_pattern[content_mora_idx] == 1
+                target_f0 = f0_high if is_high else f0_low
+                content_mora_idx += 1
+
+                # Create segments
+                for i, (ph, dur) in enumerate(zip(phonemes, duration_phs)):
+                    seg = {"name": ph, "duration_s": dur, "f0": target_f0}
+
+                    if i == 0:
+                        seg["start_of_syllable"] = 1
+                        if is_next_mora_start_of_word:
+                            seg["start_of_word"] = 1
+                            is_next_mora_start_of_word = False
+
+                    # 必要な属性をコピー
+                    for key in mora.keys():
+                        if key not in ["phonemes", "pause"]:
+                            seg[key] = mora[key]
+                    segments.append(seg)
+
+                if mora.get("word_break"):
+                    is_next_mora_start_of_word = True
 
         # Add final silence
-        segments.append({"name": "?", "duration_s": 0.5, "f0": f0_phrase_values[-1]})
+        segments.append({"name": "?", "duration_s": 0.5, "f0": f0_low})
 
         return segments
 
