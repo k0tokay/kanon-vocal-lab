@@ -269,7 +269,9 @@ class Ontology:
     def n2i(self, name: str) -> int:
         if self.reversed_name_map is None:
             self.reversed_name_map = {
-                item["name"]: item["id"] for item in self.flattened_tree
+                item["name"]: item["id"]
+                for item in self.flattened_tree
+                if item is not None
             }
         return self.reversed_name_map[name]
 
@@ -424,36 +426,123 @@ class Ontology:
         if cid not in self.flattened_tree[pid]["children"]:
             self.flattened_tree[pid]["children"].append(cid)
 
+    def add_tree(self, subtree, shift_ids=True, name_prefix="", name_suffix="@"):
+        import copy
+
+        # subtreeは参照渡しされるので、ディープコピーして元のオブジェクトを破壊しないようにする
+        subtree = copy.deepcopy(subtree)
+
+        delta_id = len(self.flattened_tree) if shift_ids else 0
+
+        # IDのマッピングを作成 (old_id -> new_id)
+        id_map = {}
+        for node in subtree:
+            if node is not None:
+                id_map[node["id"]] = node["id"] + delta_id
+
+        for node in subtree:
+            if node is None:
+                continue
+
+            # IDと名前の更新
+            old_id = node["id"]
+            new_id = id_map[old_id]
+            node["id"] = new_id
+            node["name"] = f"{name_prefix}{node['name']}{name_suffix}"
+
+            # 親子関係のIDを更新
+            # parents/childrenリスト内のIDを新しいIDに書き換える
+            # ただし、subtree内に含まれないID（外部への参照）はそのままにするか、削除するか？
+            # ここでは「subtree内に含まれるものは書き換え、そうでないものはそのまま」とする
+
+            new_parents = []
+            for pid in node["parents"]:
+                if pid in id_map:
+                    new_parents.append(id_map[pid])
+                else:
+                    # 部分木の外への参照は、コピー時には切断するのが一般的だが、
+                    # 文脈によっては維持したい場合もある。
+                    # ここでは「新しいツリーとして独立させる」ために外への参照は削除する方針をとる
+                    # もし接続したいなら後で add_cp する
+                    pass
+            node["parents"] = new_parents
+
+            new_children = []
+            for cid in node["children"]:
+                if cid in id_map:
+                    new_children.append(id_map[cid])
+                else:
+                    pass
+            node["children"] = new_children
+
+            # flattened_treeを拡張して格納
+            # リストのインデックス = ID となるように調整が必要
+            while len(self.flattened_tree) <= new_id:
+                self.flattened_tree.append(None)
+            self.flattened_tree[new_id] = node
+
+        # reversed_name_mapをリセット
+        self.reversed_name_map = None
+
     def lift_to_concept(
-        self, relation: str, dom: str, cod: str, dom_replace_from=None, direction=0
+        self,
+        relation: str,
+        dom: str,
+        cod: str,
+        dom_replace_from=None,
+        direction=0,
+        remove_old=False,
     ):
-        """ある二項関係をis-a関係に同一視する"""
+        """ある二項関係をis-a関係に同一視する．もとの関係は削除するかどうかで処理が変わる．"""
         if direction == 1:
             dom, cod = cod, dom
-        # 元の親から外す
-        parents_cod = self.flattened_tree[self.n2i(cod)]["parents"]
-        if dom_replace_from is not None:
-            pass
-        elif len(parents_cod) == 0:  # 滅多にない(?)
-            pass
-        elif len(parents_cod) == 1:
-            dom_replace_from = self.i2n(parents_cod[0])
+
+        if remove_old:
+            # 元の親から外す
+            parents_cod = self.flattened_tree[self.n2i(cod)]["parents"]
+            if dom_replace_from is not None:
+                pass
+            elif len(parents_cod) == 0:  # 滅多にない(?)
+                pass
+            elif len(parents_cod) == 1:
+                dom_replace_from = self.i2n(parents_cod[0])
+            else:
+                raise ValueError(
+                    f"Cannot determine dom_replace_from for {cod} because it has multiple parents: {[self.i2n(pid) for pid in parents_cod]}"
+                )
+            self.remove_cp(cod, dom_replace_from)
+            # dom-codを親子関係に追加
+            self.add_cp(cod, dom)
+            # 関係をis-a関係に変える
+            relation_set = self.expand(relation)
+            for rel in relation_set:
+                if direction == 1:
+                    rel = rel[::-1]
+                child_name, parent_name = rel
+                self.add_cp(child_name, parent_name)
+                self.flattened_tree[self.n2i(parent_name)]["is_instance"] = False
+            self.remove_recursively(relation)
         else:
-            raise ValueError(
-                f"Cannot determine dom_replace_from for {cod} because it has multiple parents: {[self.i2n(pid) for pid in parents_cod]}"
-            )
-        self.remove_cp(cod, dom_replace_from)
-        # dom-codを親子関係に追加
-        self.add_cp(cod, dom)
-        # 関係をis-a関係に変える
-        relation_set = self.expand(relation)
-        for rel in relation_set:
-            if direction == 1:
-                rel = rel[::-1]
-            child_name, parent_name = rel
-            self.add_cp(child_name, parent_name)
-            self.flattened_tree[self.n2i(parent_name)]["is_instance"] = False
-        self.remove_recursively(relation)
+            subtree = self.get_subtree(cod)
+            suffix = "@"
+            self.add_tree(subtree, name_suffix=suffix)
+
+            self.add_cp(cod + suffix, dom)
+
+            relation_set = self.expand(relation)
+            for rel in relation_set:
+                if direction == 1:
+                    rel = rel[::-1]
+                child_name, parent_name = rel
+
+                # child_name (例: p) はそのまま
+                # parent_name (例: voiceless) はコピーされた方 (voiceless@) を使う
+                parent_name_new = parent_name + suffix
+
+                self.add_cp(child_name, parent_name_new)
+
+                # コピーされた属性クラスを「インスタンス」から「概念」に昇格
+                self.flattened_tree[self.n2i(parent_name_new)]["is_instance"] = False
 
     def to_json(self, filename="ontology.json"):
         """flattened_treeをJSONファイルに書き出す"""
@@ -468,25 +557,109 @@ class Ontology:
             json.dump(valid_nodes, f, indent=2, ensure_ascii=False)
         print(f"Ontology saved to {filename}")
 
+    def get_denotation(self, name):
+        """(分類木以外の値を指示する場合に) 名前から値を取得する"""
+        denotations = {"[str]": str, "[int]": int, "[float]": float}
+        for key in denotations.keys():
+            if name.startswith(key):
+                value = name[len(key) :]
+                return denotations[key](value)
+        return name
+
+    def is_functional(self, relation: str, index=1) -> bool:
+        """n項関係が第index項目に関して関数的か(domainは指定しないので一意性のみ)どうかを判定する"""
+        relation_set = self.expand(relation)
+        cod_values = set()
+        for rel in relation_set:
+            cod = rel[index]
+            if cod in cod_values:
+                return False
+            cod_values.add(cod)
+        return True
+
+    def iota(self, relation: str, dom_value: str, index=0):
+        """n項関係において、第index項目がdom_valueであるタプルのうち一意に定まるcodを取得する"""
+        relation_set = self.expand(relation)
+        results = []
+        for rel in relation_set:
+            dom = rel[index]
+            if dom == dom_value:
+                results.append(rel)
+        if len(results) == 0:
+            raise ValueError(
+                f"No matching tuple found in relation '{relation}' for dom_value '{dom_value}' at index {index}."
+            )
+        if len(results) > 1:
+            raise ValueError(
+                f"Multiple matching tuples found in relation '{relation}' for dom_value '{dom_value}' at index {index}."
+            )
+        return results[0]
+
 
 class PhonemeOntology(Ontology):
     def __init__(self, tree: dict = None, flattened_tree: list = None):
         super().__init__(tree, flattened_tree)
 
+        # lift relations to is-a
+        self.suffix = "@"
+        self.lift_to_concept(
+            relation="has_voicing", dom="phonemes", cod="voicing", direction=0
+        )
+        self.lift_to_concept(
+            relation="has_place_of_articulation",
+            dom="phonemes",
+            cod="place_of_articulation",
+            direction=0,
+        )
+
     def export_phoneme_dict(self, filename="phoneme_dict.json"):
         """各音素の属性をフラットな辞書形式で書き出す"""
-        import json
 
         phoneme_dict = {}
 
-        # "phonemes" 以下のインスタンスをすべて取得
-        # まず "phonemes" のIDを取得
-        try:
-            phonemes_id = self.n2i("phonemes")
-        except KeyError:
-            print("Error: 'phonemes' concept not found in ontology.")
-            return
+        # "あるクラスに入っているかどうか"で判断する属性の集まり
+        attr_config = [
+            {"name": "type", "classes": ["vowels", "consonants"], "suffix": ""},
+            {
+                "name": "manner_of_articulation",
+                "classes": [
+                    "plosives",
+                    "fricatives",
+                    "affricates",
+                    "nasals",
+                    "approximants",
+                    "flaps",
+                    "laterals",
+                ],
+                "suffix": self.suffix,
+            },
+            {
+                "name": "place_of_articulation",
+                "classes": self.expand("place_of_articulation"),
+                "suffix": self.suffix,
+            },
+            {
+                "name": "voicing",
+                "classes": self.expand("voicing"),
+                "suffix": self.suffix,
+            },
+        ]
 
+        subtree = self.get_subtree("phonemes")
+        for node in subtree:
+            if node is None:
+                continue
+            if node["is_instance"]:
+                symbol = node["name"]
+                phoneme_dict[symbol] = {
+                    attr["name"]: any(
+                        symbol in self.expand(attr_class + attr["suffix"])
+                        for attr_class in attr["classes"]
+                    )
+                    for attr in attr_config
+                }
+
+        """
         # 再帰的にインスタンスを収集
         def _collect_instances(current_id):
             node = self.flattened_tree[current_id]
@@ -509,7 +682,7 @@ class PhonemeOntology(Ontology):
 
         with open(filename, "w", encoding="utf-8") as f:
             json.dump(phoneme_dict, f, indent=2, ensure_ascii=False)
-        print(f"Phoneme dictionary saved to {filename}")
+        print(f"Phoneme dictionary saved to {filename}")"""
 
     def _get_ancestor_names(self, node_id):
         """指定されたノードのすべての祖先の名前を取得する"""
@@ -531,17 +704,12 @@ class PhonemeOntology(Ontology):
         return ancestors
 
 
-ontology = PhonemeOntology(PHONEME_ONTOLOGY)
+ontology = Ontology(PHONEME_ONTOLOGY)
+ontology.lift_to_concept(
+    relation="has_voicing", dom="phonemes", cod="voicing", direction=0, remove_old=True
+)
+# ontology = PhonemeOntology(PHONEME_ONTOLOGY)
 
-ontology.lift_to_concept(
-    relation="has_voicing", dom="phonemes", cod="voicing", direction=0
-)
-ontology.lift_to_concept(
-    relation="has_place_of_articulation",
-    dom="phonemes",
-    cod="place_of_articulation",
-    direction=0,
-)
 ontology.visualize("ontology_after_lifting", root="phonemes")
 
 ontology.to_json("phoneme_ontology.json")
