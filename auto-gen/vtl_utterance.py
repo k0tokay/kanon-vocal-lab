@@ -10,6 +10,8 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "../vtl_api"))
 sys.path.append(os.path.join(os.path.dirname(__file__), "./"))
 from vtl_api import VocalTractLab
 
+from edit_ges import EditGes
+
 
 class VTLUtterance:
     def __init__(self):
@@ -336,7 +338,7 @@ class VTLUtterance:
             "β": "v",
             "u_": "u",
             "i_": "i",
-            "r": "d",
+            "ɾ": "d",
         }
 
         tmp_segments = []
@@ -352,116 +354,60 @@ class VTLUtterance:
         return tmp_segments
 
     def _postprocess_s2g(self, ges_data, seg_data):
-        # ジェスチャーに開始・終了時間を付与（一時的）
-        for tier_name, tier in ges_data.items():
-            current_t = 0.0
-            for g in tier["gestures"]:
-                g["_start_time"] = current_t
-                current_t += float(g["duration_s"])
-                g["_end_time"] = current_t
+        editor = EditGes(ges_data, seg_data)
 
-        current_seg_time = 0.0
         for seg in seg_data:
-            duration = float(seg.get("duration_s", 0))
-            seg_start = current_seg_time
-            seg_end = current_seg_time + duration
-
             replace_from = seg.get("replace_from")
             if replace_from:
-                print(f"Replacing {replace_from} in segment starting at {seg_start}")
+                # print(f"Replacing {replace_from} in segment {seg.get('name')}")
+
+                # セグメントに対応するジェスチャーを取得
+                # get_gestures は [{"tier": "...", "gesture": {...}, ...}, ...] のリストを返す
+                gestures_info = editor.get_gestures(seg)
+
                 if replace_from == "M":
-                    self._update_gesture(
-                        ges_data, "vowel-gestures", seg_start, seg_end, "M"
-                    )
+                    for info in gestures_info:
+                        if info["tier"] == "vowel-gestures":
+                            info["gesture"]["value"] = "M"
+
                 elif replace_from == "w":
-                    self._update_gesture(
-                        ges_data,
-                        "lip-gestures",
-                        seg_start,
-                        seg_end,
-                        "ll-labial-approx",
-                    )
+                    for info in gestures_info:
+                        if info["tier"] == "lip-gestures":
+                            info["gesture"]["value"] = "ll-labial-approx"
+
                 elif replace_from in ["φ", "β"]:
-                    self._update_gesture(
-                        ges_data,
-                        "lip-gestures",
-                        seg_start,
-                        seg_end,
-                        "ll-labial-fricative",
-                    )
+                    for info in gestures_info:
+                        if info["tier"] == "lip-gestures":
+                            info["gesture"]["value"] = "ll-labial-fricative"
+
                 elif replace_from == "u_":
-                    self._ajaust_length(
-                        ges_data, "vowel-gestures", seg_start, seg_end, 0.050
-                    )
+                    # adjust_length はまだ EditGes のメソッドとして時間指定が必要
+                    # get_gestures で取得したジェスチャーの時間情報を使って呼び出す
+                    for info in gestures_info:
+                        if info["tier"] == "vowel-gestures":
+                            editor.adjust_length(
+                                "vowel-gestures", info["start"], info["end"], 0.050
+                            )
+
                 elif replace_from == "i_":
-                    self._ajaust_length(
-                        ges_data, "vowel-gestures", seg_start, seg_end, 0.050
-                    )
-                elif replace_from == "r":
-                    self._update_gesture(
-                        ges_data,
-                        "tongue-tip-gestures",
-                        seg_start,
-                        seg_end,
-                        "tt-alveolar-flap",
-                    )
-                    self._update_gesture(
-                        ges_data,
-                        "glottal-shape-gestures",
-                        seg_start,
-                        seg_end,
-                        "modal",
-                    )
-                    self._ajaust_length(
-                        ges_data, "tongue-tip-gestures", seg_start, seg_end, 0.090
-                    )
+                    for info in gestures_info:
+                        if info["tier"] == "vowel-gestures":
+                            editor.adjust_length(
+                                "vowel-gestures", info["start"], info["end"], 0.050
+                            )
 
-            current_seg_time += duration
+                elif replace_from == "ɾ":
+                    for info in gestures_info:
+                        if info["tier"] == "tongue-tip-gestures":
+                            info["gesture"]["value"] = "tt-alveolar-flap"
+                            # 長さ調整も行う
+                            editor.adjust_length(
+                                "tongue-tip-gestures", info["start"], info["end"], 0.090
+                            )
+                        elif info["tier"] == "glottal-shape-gestures":
+                            info["gesture"]["value"] = "modal"
 
-        # 一時的なキーを削除
-        for tier in ges_data.values():
-            for g in tier["gestures"]:
-                g.pop("_start_time", None)
-                g.pop("_end_time", None)
-
-        return ges_data
-
-    def _update_gesture(self, ges_data, tier_name, start, end, new_value):
-        # けっこう無理矢理だけどいいや...
-        gestures = ges_data.get(tier_name, {}).get("gestures", [])
-        mid = (start + end) / 2
-        for i, g in enumerate(gestures):
-            # セグメントの中央を含むジェスチャーを探す
-            if g["_start_time"] <= mid < g["_end_time"]:
-                print(
-                    f"Updating gesture in tier '{tier_name}' from {g['value']} to {new_value}"
-                )
-                # ニュートラルでないジェスチャーを対象とする
-                if not g.get("neutral"):
-                    g["value"] = new_value
-                    return
-                else:
-                    gestures[i - 1]["value"] = new_value
-
-    def _ajaust_length(self, ges_data, tier_name, start, end, adjust_length):
-        gestures = ges_data.get(tier_name, {}).get("gestures", [])
-        mid = (start + end) / 2
-        for i, g in enumerate(gestures):
-            # セグメントの中央を含むジェスチャーを探す
-            if g["_start_time"] <= mid < g["_end_time"]:
-                print(
-                    f"Adjusting length of gesture in tier '{tier_name}' from {g['duration_s']} to {g['duration_s'] + adjust_length}"
-                )
-                # ニュートラルでないジェスチャーを対象とする
-                # if not g.get("neutral"):
-                #     target_idx = i
-                # else:
-                # 一つずれていることが多い(?)
-                target_idx = i - 1
-                t_before = float(gestures[target_idx]["duration_s"])
-                gestures[target_idx]["duration_s"] = adjust_length
-                gestures[target_idx + 1]["duration_s"] -= adjust_length - t_before
-                return
+        return editor.get_data()
 
     def _f0_gestures_s2g(self, seg_data=None):
         if seg_data is None:
