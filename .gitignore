@@ -7,3 +7,5 @@ examples
 .DS_Store
 __pycache__
 ref
+*.png
+*.json

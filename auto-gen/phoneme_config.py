@@ -31,7 +31,6 @@ PHONEME_ONTOLOGY = {
                     "S",
                     "Z",
                     "C",
-                    "j",
                     "x",
                     "r",
                     "R",
@@ -40,6 +39,9 @@ PHONEME_ONTOLOGY = {
                 "approximants": {
                     "j",
                     "w",
+                },
+                "flaps": {
+                    "ɾ",
                 },
                 "plosives": {
                     "?",
@@ -64,6 +66,27 @@ PHONEME_ONTOLOGY = {
                 "laterals": {
                     "l",
                 },
+            },
+        },
+        "vtl_objects": {
+            "gesture_tiers": {
+                "vowel-gestures",
+                "labial-gestures",
+                "tongue-tip-gestures",
+                "tongue-body-gestures",
+                "velic-gestures",
+                "glottal-shape-gestures",
+                "f0-gestures",
+                "lung-pressure-gestures",
+            },
+            "glottal_shapes": {
+                "modal",
+                "stop",
+                "voiced-fricative",
+                "voiceless-fricative",
+                "voiced-plosive",
+                "voiceless-plosive",
+                "h",
             },
         },
         "features": {
@@ -104,6 +127,24 @@ PHONEME_ONTOLOGY = {
                         "tS",
                     }
                 ],
+                *[
+                    (phoneme, "voiced")
+                    for phoneme in {
+                        "β",
+                        "v",
+                        "D",
+                        "z",
+                        "Z",
+                        "j",
+                        "r",
+                        "R",
+                        "b",
+                        "d",
+                        "g",
+                        "dz",
+                        "dZ",
+                    }
+                ],
             },
             "has_place_of_articulation": {
                 *[
@@ -132,7 +173,48 @@ PHONEME_ONTOLOGY = {
                 *[(phoneme, "velar") for phoneme in {"k", "g", "N", "x"}],
                 *[(phoneme, "glottal") for phoneme in {"h", "?"}],
             },
-        }
+        },
+        "has_gesture_tiers": {
+            # 調音点とジェスチャーティアの対応
+            ("vowels", "vowel-gestures"),
+            ("labial", "labial-gestures"),
+            ("alveolar", "tongue-tip-gestures"),
+            ("dental", "tongue-tip-gestures"),
+            ("postalveolar", "tongue-tip-gestures"),
+            ("palatal", "tongue-body-gestures"),
+            ("velar", "tongue-body-gestures"),
+            ("glottal", "glottal-shape-gestures"),
+        },
+        "has_gesture_value": {
+            ("a", "[str]a"),
+            ("o", "[str]o"),
+            ("e", "[str]e"),
+            ("i", "[str]i"),
+            ("y", "[str]y"),
+            ("M", "[str]M"),
+            ("u", "[str]u"),
+            *[(phoneme, "[str]ll-labial-closure") for phoneme in {"p", "b", "m"}],
+            *[(phoneme, "[str]ll-labial-approx") for phoneme in {"p", "b", "w"}],
+            *[(phoneme, "[str]ll-labial-fricative") for phoneme in {"φ", "β"}],
+            *[(phoneme, "[str]ll-labiodental-fricative") for phoneme in {"f", "v"}],
+            *[(phoneme, "[str]ll-dental-fricative") for phoneme in {"T", "D"}],
+            *[(phoneme, "[str]ll-alveolar-closure") for phoneme in {"t", "d", "n"}],
+            *[(phoneme, "[str]ll-alveolar-fricative") for phoneme in {"s", "z"}],
+            *[(phoneme, "[str]ll-postalveolar-fricative") for phoneme in {"S", "Z"}],
+            *[(phoneme, "[str]ll-velar-closure") for phoneme in {"k", "g", "N"}],
+        },
+        "has_glottal_shape": {
+            ("voiced", "voiced-fricative"),
+            ("voiced", "voiced-plosive"),
+            ("voiceless", "voiceless-fricative"),
+            ("voiceless", "voiceless-plosive"),
+            ("plosives", "voiced-plosive"),
+            ("plosives", "voiceless-plosive"),
+            ("fricatives", "voiced-fricative"),
+            ("fricatives", "voiceless-fricative"),
+            ("h", "h"),  # 例外処理ができないからダメそう
+            ("?", "stop"),
+        },
     },
 }
 
@@ -282,7 +364,6 @@ class Ontology:
         dot.attr(rankdir="TB")  # Top to Bottom レイアウト
 
         if root is not None:
-            root_id = self.n2i(root)
             subtree = self.get_subtree(root)
         else:
             subtree = self.flattened_tree
@@ -374,10 +455,83 @@ class Ontology:
             self.flattened_tree[self.n2i(parent_name)]["is_instance"] = False
         self.remove_recursively(relation)
 
+    def to_json(self, filename="ontology.json"):
+        """flattened_treeをJSONファイルに書き出す"""
+        import json
 
-ontology = Ontology(PHONEME_ONTOLOGY)
+        # Noneを除去してIDを振り直す必要があるが、
+        # ここでは単純にNone以外のリストとして書き出す
+        # (IDの整合性を保つなら再構築が必要だが、簡易的なダンプとする)
+        valid_nodes = [node for node in self.flattened_tree if node is not None]
 
-ontology.visualize(root="has_voicing")
+        with open(filename, "w", encoding="utf-8") as f:
+            json.dump(valid_nodes, f, indent=2, ensure_ascii=False)
+        print(f"Ontology saved to {filename}")
+
+
+class PhonemeOntology(Ontology):
+    def __init__(self, tree: dict = None, flattened_tree: list = None):
+        super().__init__(tree, flattened_tree)
+
+    def export_phoneme_dict(self, filename="phoneme_dict.json"):
+        """各音素の属性をフラットな辞書形式で書き出す"""
+        import json
+
+        phoneme_dict = {}
+
+        # "phonemes" 以下のインスタンスをすべて取得
+        # まず "phonemes" のIDを取得
+        try:
+            phonemes_id = self.n2i("phonemes")
+        except KeyError:
+            print("Error: 'phonemes' concept not found in ontology.")
+            return
+
+        # 再帰的にインスタンスを収集
+        def _collect_instances(current_id):
+            node = self.flattened_tree[current_id]
+            if node is None:
+                return
+
+            if node["is_instance"]:
+                # インスタンス（音素）の場合、その属性を収集
+                symbol = node["name"]
+                attributes = self._get_ancestor_names(current_id)
+                phoneme_dict[symbol] = {
+                    "symbol": symbol,
+                    "attributes": list(attributes),
+                }
+
+            for child_id in node["children"]:
+                _collect_instances(child_id)
+
+        _collect_instances(phonemes_id)
+
+        with open(filename, "w", encoding="utf-8") as f:
+            json.dump(phoneme_dict, f, indent=2, ensure_ascii=False)
+        print(f"Phoneme dictionary saved to {filename}")
+
+    def _get_ancestor_names(self, node_id):
+        """指定されたノードのすべての祖先の名前を取得する"""
+        ancestors = set()
+
+        def _rec(current_id):
+            node = self.flattened_tree[current_id]
+            if node is None:
+                return
+
+            # 自分自身は属性に含めない（必要なら含める）
+            if current_id != node_id:
+                ancestors.add(node["name"])
+
+            for parent_id in node["parents"]:
+                _rec(parent_id)
+
+        _rec(node_id)
+        return ancestors
+
+
+ontology = PhonemeOntology(PHONEME_ONTOLOGY)
 
 ontology.lift_to_concept(
     relation="has_voicing", dom="phonemes", cod="voicing", direction=0
@@ -388,4 +542,7 @@ ontology.lift_to_concept(
     cod="place_of_articulation",
     direction=0,
 )
-ontology.visualize("ontology_after_lifting")
+ontology.visualize("ontology_after_lifting", root="phonemes")
+
+ontology.to_json("phoneme_ontology.json")
+ontology.export_phoneme_dict("phoneme_properties.json")
