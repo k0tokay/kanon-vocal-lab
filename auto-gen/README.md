@@ -5,4 +5,3 @@
 2. Liguistic Score：言語ごとに指定された読み方に忠実な表記を使用し，プロソディのアノテーションを手動でつける形式
 3. Segment Sequence：音素列の形式．VTLに既存，
 4. Gestual Score：声帯の運動を記述する形式．VTLに既存．
-
