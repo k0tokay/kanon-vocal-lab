@@ -202,6 +202,8 @@ PHONEME_ONTOLOGY = {
             *[(phoneme, "[str]tt-alveolar-closure") for phoneme in {"t", "d", "n"}],
             *[(phoneme, "[str]tt-alveolar-fricative") for phoneme in {"s", "z"}],
             *[(phoneme, "[str]tt-postalveolar-fricative") for phoneme in {"S", "Z"}],
+            *[(phoneme, "[str]tb-palatal-fricative") for phoneme in {"j", "C"}],
+            *[(phoneme, "[str]tt-velar-fricative") for phoneme in {"x", "r", "R"}],
             *[(phoneme, "[str]tb-velar-closure") for phoneme in {"k", "g", "N"}],
         },
         "has_glottal_shape": {

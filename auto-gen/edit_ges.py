@@ -18,6 +18,8 @@ class EditGes:
         else:
             self.phoneme_config = config
 
+        self.map = self.get_gestures_map()
+
     def _load_phoneme_config(self):
         json_path = os.path.join(os.path.dirname(__file__), "phoneme_properties.json")
         if not os.path.exists(json_path):
@@ -52,144 +54,170 @@ class EditGes:
         セグメントの開始時刻を含むジェスチャーを対象とする。
         """
         gestures = self.gesture_tiers.get(tier_name, {}).get("gestures", [])
+        if not gestures:
+            return -1, None
+
         cand = -1
         target_time = start
         for i, g in enumerate(gestures):
             if g["_start_time"] <= target_time < g["_end_time"]:
                 cand = i
+                break
+
+        if cand == -1:
+            # Overlap not found, find closest
+            min_dist = float("inf")
+            for i, g in enumerate(gestures):
+                dist = min(
+                    abs(g["_start_time"] - target_time),
+                    abs(g["_end_time"] - target_time),
+                )
+                if dist < min_dist:
+                    min_dist = dist
+                    cand = i
+
         # 0, -1, 1, -2, 2 ... の順でiの周りを探索して，valueが一致する最も近いジェスチャーを返す
-        if value is None:
-            if cand >= 0:
-                return cand, gestures[cand]
-            else:
-                return -1, None
-        else:
-            for offset in range(len(gestures)):
-                for sign in [1, -1]:
-                    i = cand + sign * offset
-                    if 0 <= i < len(gestures):
-                        if gestures[i]["value"] == value:
-                            return i, gestures[i]
-            return -1, None
+        for offset in range(len(gestures)):
+            for sign in [-1, 1]:
+                if offset == 0 and sign == 1:
+                    continue
+                i = cand + sign * offset
+                if 0 <= i < len(gestures):
+                    print(
+                        "  check",
+                        i,
+                        cand,
+                        sign * offset,
+                        gestures[i]["value"],
+                        "for value",
+                        value,
+                        gestures[i]["value"] == value,
+                    )
+                    if gestures[i]["value"] in ["stop"] or gestures[i]["neutral"]:
+                        continue
+                    if value is None or gestures[i]["value"] == value:
+                        return i, gestures[i]
 
-    def update_value(self, tier_name: str, start: float, end: float, new_value: str):
-        """
-        指定した時間範囲（セグメント）に対応するジェスチャーの値を更新する。
-        セグメントの中央時刻を含むジェスチャーを対象とする。
-        """
-        i, g = self.select_gesture(tier_name, start, end)
-        if g:
-            print(
-                f"Updating gesture value in tier '{tier_name}' from {g['value']} to {new_value}"
-            )
-            gestures = self.gesture_tiers.get(tier_name, {}).get("gestures", [])
-            gestures[i]["value"] = new_value
+        return -1, None
 
-    def adjust_length(
-        self, tier_name: str, start: float, end: float, adjust_length: float
+    def s2g(self, idx):
+        """セグメントインデックスから対応するジェスチャーを取得する"""
+        map_ = self.map
+        info = map_[idx]
+        tier_name = info["tier"]
+        if info["tier"] != tier_name:
+            return None
+        ges_idx = info["index"]
+        if ges_idx == -1:
+            return None
+        gestures = self.gesture_tiers[tier_name]["gestures"]
+        return gestures[ges_idx]
+
+    def s2gls(self, idx):
+        """セグメントインデックスから対応する声門形状ジェスチャーを取得する"""
+        map_ = self.map
+        info = map_[idx]
+        ges_idx = info["glottal_shape_index"]
+        if ges_idx == -1:
+            return None
+        gestures = self.gesture_tiers["glottal-shape-gestures"]["gestures"]
+        return gestures[ges_idx]
+
+    def adjust_gesture_timing(
+        self, ges_idx: int, tier_name: str, delta_start: float, delta_end: float
     ):
-        """
-        指定した時間範囲に対応するジェスチャーの長さを変更する。
-        対象ジェスチャーの長さを固定値(adjust_length)にし、
-        その差分を次のジェスチャーで吸収する。
-        """
-        i, g = self.select_gesture(tier_name, start, end)
-        if g is None:
-            return
-
+        """指定したジェスチャーの開始・終了時間を調整する"""
         gestures = self.gesture_tiers.get(tier_name, {}).get("gestures", [])
-
-        if i + 1 >= len(gestures):
-            print("Warning: Cannot adjust length, no next gesture to absorb diff.")
+        if not (0 <= ges_idx < len(gestures)):
             return
+        ges = gestures[ges_idx]
 
-        print(
-            f"Adjusting length of gesture in tier '{tier_name}' from {g['duration_s']} to {adjust_length}"
-        )
+        # 開始時間の調整
+        new_start = ges["_start_time"] + delta_start
+        if ges_idx > 0:
+            prev_ges = gestures[ges_idx - 1]
+            prev_end = prev_ges["_end_time"]
+            if new_start < prev_end:
+                new_start = prev_end
+            prev_ges["duration_s"] = new_start - prev_ges["_start_time"]
+            prev_ges["_end_time"] = new_start
+        ges["duration_s"] = ges["_end_time"] - new_start
+        ges["_start_time"] = new_start
 
-        t_before = float(gestures[i]["duration_s"])
-        diff = adjust_length - t_before
+        # 終了時間の調整
+        new_end = ges["_end_time"] + delta_end
+        if ges_idx + 1 < len(gestures):
+            next_ges = gestures[ges_idx + 1]
+            next_start = next_ges["_start_time"]
+            if new_end > next_start:
+                new_end = next_start
+            next_ges["duration_s"] = next_ges["_end_time"] - new_end
+            next_ges["_start_time"] = new_end
+        ges["duration_s"] = new_end - ges["_start_time"]
+        ges["_end_time"] = new_end
 
-        # 長さ更新
-        gestures[i]["duration_s"] = adjust_length
-        gestures[i + 1]["duration_s"] = float(gestures[i + 1]["duration_s"]) - diff
+    def process_replacements(self):
+        map_ = self.map
 
-        # 時間情報の再計算が必要
-        self._add_timing_info()
+        for i, seg in enumerate(self.segments):
+            replace_from = seg.get("replace_from")
+            if not replace_from:
+                name = seg.get("name")
+                if name == "b":
+                    self.adjust_gesture_timing(
+                        map_[i]["index"], map_[i]["tier"], 0.01, -0.01
+                    )
+                continue
 
-    def scale_duration(
-        self,
-        tier_name: str,
-        start: float,
-        end: float,
-        left_scale: float = 1.0,
-        right_scale: float = 1.0,
-    ):
-        """
-        指定したジェスチャーの長さを左右それぞれスケール倍する。
-        左側を伸ばすと前のジェスチャーが縮み、右側を伸ばすと次のジェスチャーが縮む。
-        :param left_scale: 左側の伸縮率 (1.0 = 変化なし, >1.0 = 伸びる/前が縮む)
-        :param right_scale: 右側の伸縮率
-        """
-        i, g = self.select_gesture(tier_name, start, end)
-        if g is None:
-            return
+            ges = self.s2g(i)
 
-        gestures = self.gesture_tiers.get(tier_name, {}).get("gestures", [])
-        current_duration = float(gestures[i]["duration_s"])
+            if replace_from == "M":
+                ges["value"] = "M"
 
-        # 左右それぞれの変化量を計算（単純に期間を半分ずつ担当していると仮定して計算するか、
-        # あるいは現在の期間全体に対して適用するかだが、ここでは「現在の期間」を基準にする）
-        # ただし「左を伸ばす」=「開始時刻を早める」=「前のジェスチャーを削る」
+            elif replace_from == "w":
+                ges["value"] = "ll-labial-approx"
+                ges_gs = self.s2gls(i)
+                if ges_gs:
+                    ges_gs["value"] = "modal"
 
-        # 変化量 (正なら自分が増える)
-        # ここでは単純に「現在の長さ」に対してスケールを掛けるのではなく、
-        # 「現在の長さ」を維持しつつ、境界を移動させるイメージで実装する
+            elif replace_from in ["φ", "β"]:
+                ges["value"] = "ll-labial-fricative"
 
-        # 左境界の移動量: (scale - 1.0) * (duration / 2) みたいな感じ？
-        # 指示が「n%拡大縮小」なので、duration自体が変わる。
+            elif replace_from in ["u_", "i_"]:
+                ges["value"] = "u" if replace_from == "u_" else "i"
 
-        # 解釈:
-        # left_scale=1.2 -> 左側に20%伸びる（前のジェスチャーがその分減る）
-        # right_scale=0.8 -> 右側が20%縮む（次のジェスチャーがその分増える）
-        # 基準となる長さは現在の duration_s とする
+                # 一つ前の音素の終了時間よりも前に終了するように調整
+                ges_before = self.s2g(i - 1)
+                print("ges_before", ges_before)
+                end_time_new = ges_before["_end_time"] - 0.02
+                shorten_length = ges["_end_time"] - end_time_new
+                self.adjust_gesture_timing(
+                    map_[i]["index"], map_[i]["tier"], 0.0, -shorten_length
+                )
+                print(map_[i])
+                ges_gs = self.s2gls(i)
+                ges_gs["value"] = "modal"
 
-        delta_left = current_duration * (left_scale - 1.0)
-        delta_right = current_duration * (right_scale - 1.0)
+            elif replace_from == "ɾ":
+                ges["value"] = "tt-alveolar-flap"
+                # 母音の開点を中心に半分ずつ
+                total_length = 0.05
+                ges_after = self.s2g(i + 1)
+                mid_time_new = ges_after["_start_time"]
+                start_time_new = mid_time_new - total_length / 2
+                end_time_new = mid_time_new + total_length / 2
 
-        # 前のジェスチャーチェック
-        if i > 0:
-            prev_g = gestures[i - 1]
-            prev_dur = float(prev_g["duration_s"])
-            if prev_dur - delta_left < 0:
-                print(f"Warning: Previous gesture too short to shrink by {delta_left}")
-                delta_left = prev_dur  # 限界まで縮める
+                self.adjust_gesture_timing(
+                    map_[i]["index"],
+                    map_[i]["tier"],
+                    start_time_new - ges["_start_time"],
+                    end_time_new - ges["_end_time"],
+                )
+                # 舌の動きを速くする
+                ges["time_constant_s"] = 0.009
 
-            gestures[i - 1]["duration_s"] = prev_dur - delta_left
-        else:
-            delta_left = 0  # 前がないなら伸ばせない
-
-        # 次のジェスチャーチェック
-        if i + 1 < len(gestures):
-            next_g = gestures[i + 1]
-            next_dur = float(next_g["duration_s"])
-            if next_dur - delta_right < 0:
-                print(f"Warning: Next gesture too short to shrink by {delta_right}")
-                delta_right = next_dur
-
-            gestures[i + 1]["duration_s"] = next_dur - delta_right
-        else:
-            delta_right = 0
-
-        # 自身の長さを更新
-        new_duration = current_duration + delta_left + delta_right
-        gestures[i]["duration_s"] = new_duration
-
-        print(
-            f"Scaled gesture in '{tier_name}': {current_duration:.4f} -> {new_duration:.4f} (L:{left_scale}, R:{right_scale})"
-        )
-
-        self._add_timing_info()
+                ges_gs = self.s2gls(i)
+                ges_gs["value"] = "modal"
 
     def get_gestures_map(self):
         map = []
@@ -204,7 +232,7 @@ class EditGes:
             print("seg", i, seg["name"], tier, value)
             ges_idx, ges = self.select_gesture(tier, seg_start, seg_end, value=value)
             ges_gs_idx, ges_gs = self.select_gesture(
-                "glottal_shape", seg_start, seg_end
+                "glottal-shape-gestures", seg_start, seg_end
             )
             map.append(
                 {

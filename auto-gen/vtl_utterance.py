@@ -355,74 +355,7 @@ class VTLUtterance:
 
     def _postprocess_s2g(self, ges_data, seg_data):
         editor = EditGes(ges_data, seg_data)
-        config = editor.phoneme_config
-        map_ = editor.get_gestures_map()
-
-        for i, seg in enumerate(seg_data):
-            replace_from = seg.get("replace_from")
-            if replace_from:
-
-                def get_ges(idx):
-                    info = map_[idx]
-                    return editor.gesture_tiers[info["tier"]]["gestures"][info["index"]]
-
-                def get_ges_gs(idx):
-                    info = map_[idx]
-                    return editor.gesture_tiers["glottal-shape-gestures"]["gestures"][
-                        info["glottal_shape_index"]
-                    ]
-
-                ges = get_ges(i)
-                ges_before = get_ges(i - 1) if i - 1 >= 0 else None
-                ges_after = get_ges(i + 1) if i + 1 < len(seg_data) else None
-                if replace_from == "M":
-                    ges["value"] = "M"
-                elif replace_from == "w":
-                    print(ges, seg_data[i]["name"])
-                    ges["value"] = "ll-labial-approx"
-                    ges_gs = get_ges_gs(i)
-                    ges_gs["value"] = "modal"
-                elif replace_from in ["φ", "β"]:
-                    ges["value"] = "ll-labial-fricative"
-                elif replace_from == "u_":
-                    ges["value"] = "u"
-                    end_time = ges_before["_end_time"] - 0.03
-                    ges["_end_time"] = end_time
-                    ges["duration_s"] = end_time - ges["_start_time"]
-                    ges_after["_start_time"] = end_time
-                    ges_after["duration_s"] = ges_after["_end_time"] - end_time
-                elif replace_from == "i_":
-                    ges["value"] = "i"
-                    end_time = ges_before["_end_time"] - 0.03
-                    ges["_end_time"] = end_time
-                    ges["duration_s"] = end_time - ges["_start_time"]
-                    ges_after["_start_time"] = end_time
-                    ges_after["duration_s"] = ges_after["_end_time"] - end_time
-                elif replace_from == "ɾ":
-                    ges["value"] = "tt-alveolar-flap"
-
-                    ges_gs = get_ges_gs(i)
-                    ges_gs["value"] = "modal"
-                """
-                elif replace_from == "u_":
-                    info = map_[seg_data.index(seg)]
-                elif replace_from == "i_":
-                    for info in gestures_info:
-                        if info["tier"] == "vowel-gestures":
-                            editor.adjust_length(
-                                "vowel-gestures", info["start"], info["end"], 0.050
-                            )
-
-                elif replace_from == "ɾ":
-                    for info in gestures_info:
-                        if info["tier"] == "tongue-tip-gestures":
-                            info["gesture"]["value"] = "tt-alveolar-flap"
-                            # 長さ調整も行う
-                            editor.adjust_length(
-                                "tongue-tip-gestures", info["start"], info["end"], 0.090
-                            )
-                        elif info["tier"] == "glottal-shape-gestures":
-                            info["gesture"]["value"] = "modal"""
+        editor.process_replacements()
         return editor.get_data()
 
     def _f0_gestures_s2g(self, seg_data=None):
