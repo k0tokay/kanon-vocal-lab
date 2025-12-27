@@ -1,5 +1,9 @@
+import json
+import os
+
+
 class EditGes:
-    def __init__(self, gesture_tiers: dict, segments: list = None):
+    def __init__(self, gesture_tiers: dict, segments: list = None, config: dict = None):
         """
         :param gesture_tiers: VTLUtterance.gesture_tiers と同じ構造の辞書
                               {tier_name: {"unit": str, "gestures": [dict]}}
@@ -9,12 +13,12 @@ class EditGes:
         self.segments = segments if segments is not None else []
         # ジェスチャーに開始・終了時間を付与（操作用）
         self._add_timing_info()
-        self.phoneme_config = self._load_phoneme_config()
+        if config is None:
+            self.phoneme_config = self._load_phoneme_config()
+        else:
+            self.phoneme_config = config
 
     def _load_phoneme_config(self):
-        import json
-        import os
-
         json_path = os.path.join(os.path.dirname(__file__), "phoneme_properties.json")
         if not os.path.exists(json_path):
             return {}
@@ -42,17 +46,31 @@ class EditGes:
         self._remove_timing_info()
         return self.gesture_tiers
 
-    def select_gesture(self, tier_name: str, start: float, end: float):
+    def select_gesture(self, tier_name: str, start: float, end: float, value=None):
         """
         指定した時間範囲（セグメント）に対応するジェスチャーを取得する。
         セグメントの開始時刻を含むジェスチャーを対象とする。
         """
         gestures = self.gesture_tiers.get(tier_name, {}).get("gestures", [])
+        cand = -1
         target_time = start
         for i, g in enumerate(gestures):
             if g["_start_time"] <= target_time < g["_end_time"]:
-                return i, gestures[i]
-        return -1, None
+                cand = i
+        # 0, -1, 1, -2, 2 ... の順でiの周りを探索して，valueが一致する最も近いジェスチャーを返す
+        if value is None:
+            if cand >= 0:
+                return cand, gestures[cand]
+            else:
+                return -1, None
+        else:
+            for offset in range(len(gestures)):
+                for sign in [1, -1]:
+                    i = cand + sign * offset
+                    if 0 <= i < len(gestures):
+                        if gestures[i]["value"] == value:
+                            return i, gestures[i]
+            return -1, None
 
     def update_value(self, tier_name: str, start: float, end: float, new_value: str):
         """
@@ -173,129 +191,31 @@ class EditGes:
 
         self._add_timing_info()
 
-    def get_gestures(self, segment: dict):
-        """
-        指定されたセグメントに対応するジェスチャーを取得する。
-        セグメントは self.segments に含まれている必要がある。
-        """
-        if not self.segments:
-            return []
-
-        try:
-            # 同一オブジェクト検索
-            idx = -1
-            for i, s in enumerate(self.segments):
-                if s is segment:
-                    idx = i
-                    break
-
-            if idx == -1:
-                # 見つからない場合は値で検索（fallback）
-                idx = self.segments.index(segment)
-
-        except ValueError:
-            print("Segment not found in editor.segments")
-            return []
-
-        # 開始時間を計算
-        seg_start = 0.0
-        for i in range(idx):
-            seg_start += float(self.segments[i].get("duration_s", 0.0))
-
-        name = segment.get("name")
-
-        found_gestures = []
-        if name in self.phoneme_config:
-            config = self.phoneme_config[name]
-            tier = config.get("has_gesture_tiers")
-            expected_value = config.get("has_gesture_value")
-
-            if tier:
-                gestures = self.gesture_tiers.get(tier, {}).get("gestures", [])
-                for g in gestures:
-                    if g["_start_time"] <= seg_start < g["_end_time"]:
-                        found_gestures.append(
-                            {
-                                "tier": tier,
-                                "gesture": g,
-                                "expected_value": expected_value,
-                                "start": g["_start_time"],
-                                "end": g["_end_time"],
-                            }
-                        )
-                        break
-
-        return found_gestures
-
-    def get_segment_gesture_timings(self, segments):
-        """
-        セグメント列を受け取り、各セグメントに対応するジェスチャーの時間情報を取得する。
-        ジェスチャーの特定には phoneme_properties.json の設定を使用する。
-        """
-        import json
-        import os
-
-        json_path = os.path.join(os.path.dirname(__file__), "phoneme_properties.json")
-        if not os.path.exists(json_path):
-            print(f"Warning: {json_path} not found.")
-            return []
-
-        with open(json_path, "r", encoding="utf-8") as f:
-            phoneme_config = json.load(f)
-
-        # ジェスチャーのタイミングを計算
-        tier_timings = {}
-        for tier_name, tier_data in self.gesture_tiers.items():
-            timings = []
-            t = 0.0
-            for g in tier_data["gestures"]:
-                duration = float(g["duration_s"])
-                timings.append({"start": t, "end": t + duration, "gesture": g})
-                t += duration
-            tier_timings[tier_name] = timings
-
-        results = []
-        current_time = 0.0
-
-        for seg in segments:
-            name = seg.get("name")
-            duration = float(seg.get("duration_s", 0.0))
-            seg_start = current_time
-            seg_end = current_time + duration
-
-            info = {
-                "segment_index": len(results),
-                "name": name,
-                "segment_start": seg_start,
-                "segment_end": seg_end,
-                "gestures": [],
-            }
-
-            if name in phoneme_config:
-                config = phoneme_config[name]
-                tier = config.get("has_gesture_tiers")
-                expected_value = config.get("has_gesture_value")
-
-                if tier and tier in tier_timings:
-                    # セグメントの開始時刻を含むジェスチャーを探す
-                    found = None
-                    for item in tier_timings[tier]:
-                        if item["start"] <= seg_start < item["end"]:
-                            found = item
-                            break
-
-                    if found:
-                        info["gestures"].append(
-                            {
-                                "tier": tier,
-                                "start": found["start"],
-                                "end": found["end"],
-                                "value": found["gesture"]["value"],
-                                "expected_value": expected_value,
-                            }
-                        )
-
-            results.append(info)
-            current_time += duration
-
-        return results
+    def get_gestures_map(self):
+        map = []
+        current_t = 0.0
+        for i in range(len(self.segments)):
+            seg = self.segments[i]
+            seg_start = current_t
+            seg_end = seg_start + float(seg.get("duration_s", 0.0))
+            current_t = seg_end
+            tier = self.phoneme_config[seg["name"]].get("has_gesture_tiers")
+            value = self.phoneme_config[seg["name"]].get("has_gesture_value")
+            print("seg", i, seg["name"], tier, value)
+            ges_idx, ges = self.select_gesture(tier, seg_start, seg_end, value=value)
+            ges_gs_idx, ges_gs = self.select_gesture(
+                "glottal_shape", seg_start, seg_end
+            )
+            map.append(
+                {
+                    "segment_index": i,
+                    "segment_start": seg_start,
+                    "segment_end": seg_end,
+                    "index": ges_idx,
+                    "tier": tier,
+                    "gesture": ges,
+                    "glottal_shape_index": ges_gs_idx,
+                    "glottal_shape_gesture": ges_gs,
+                }
+            )
+        return map

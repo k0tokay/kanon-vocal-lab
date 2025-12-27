@@ -71,7 +71,7 @@ PHONEME_ONTOLOGY = {
         "vtl_objects": {
             "gesture_tiers": {
                 "vowel-gestures",
-                "labial-gestures",
+                "lip-gestures",
                 "tongue-tip-gestures",
                 "tongue-body-gestures",
                 "velic-gestures",
@@ -177,13 +177,14 @@ PHONEME_ONTOLOGY = {
         "has_gesture_tiers": {
             # 調音点とジェスチャーティアの対応
             ("vowels", "vowel-gestures"),
-            ("labial", "labial-gestures"),
-            ("alveolar", "tongue-tip-gestures"),
-            ("dental", "tongue-tip-gestures"),
-            ("postalveolar", "tongue-tip-gestures"),
-            ("palatal", "tongue-body-gestures"),
-            ("velar", "tongue-body-gestures"),
-            ("glottal", "glottal-shape-gestures"),
+            ("labial@", "lip-gestures"),
+            ("labiodental@", "lip-gestures"),
+            ("alveolar@", "tongue-tip-gestures"),
+            ("dental@", "tongue-tip-gestures"),
+            ("postalveolar@", "tongue-tip-gestures"),
+            ("palatal@", "tongue-body-gestures"),
+            ("velar@", "tongue-body-gestures"),
+            ("glottal@", "glottal-shape-gestures"),
         },
         "has_gesture_value": {
             ("a", "[str]a"),
@@ -196,12 +197,12 @@ PHONEME_ONTOLOGY = {
             *[(phoneme, "[str]ll-labial-closure") for phoneme in {"p", "b", "m"}],
             *[(phoneme, "[str]ll-labial-approx") for phoneme in {"w"}],
             *[(phoneme, "[str]ll-labial-fricative") for phoneme in {"φ", "β"}],
-            *[(phoneme, "[str]ll-labiodental-fricative") for phoneme in {"f", "v"}],
-            *[(phoneme, "[str]ll-dental-fricative") for phoneme in {"T", "D"}],
-            *[(phoneme, "[str]ll-alveolar-closure") for phoneme in {"t", "d", "n"}],
-            *[(phoneme, "[str]ll-alveolar-fricative") for phoneme in {"s", "z"}],
-            *[(phoneme, "[str]ll-postalveolar-fricative") for phoneme in {"S", "Z"}],
-            *[(phoneme, "[str]ll-velar-closure") for phoneme in {"k", "g", "N"}],
+            *[(phoneme, "[str]ll-dental-fricative") for phoneme in {"f", "v"}],
+            *[(phoneme, "[str]tt-dental-fricative") for phoneme in {"T", "D"}],
+            *[(phoneme, "[str]tt-alveolar-closure") for phoneme in {"t", "d", "n"}],
+            *[(phoneme, "[str]tt-alveolar-fricative") for phoneme in {"s", "z"}],
+            *[(phoneme, "[str]tt-postalveolar-fricative") for phoneme in {"S", "Z"}],
+            *[(phoneme, "[str]tb-velar-closure") for phoneme in {"k", "g", "N"}],
         },
         "has_glottal_shape": {
             ("voiced", "voiced-fricative"),
@@ -291,18 +292,34 @@ class Ontology:
 
         return wrapper
 
+    def use_denotation(self, name: str) -> bool:
+        """名前が値を指示しているかどうかを判定する"""
+        if isinstance(name, tuple):
+            return False
+        denotations = {"[str]", "[int]", "[float]"}
+        for key in denotations:
+            if name.startswith(key):
+                return True
+        return False
+
     def expand(self, name: str) -> list:
         """ある概念のインスタンスをすべて取得する"""
-        start_id = self.n2i(name)
         results = set()
 
-        def _rec(current_id: int):
+        def _rec(current: str):
+            if self.use_denotation(current):
+                results.add(current)
+                return
+            if isinstance(current, tuple):
+                results.add(current)
+                return
+            current_id = self.n2i(current)
             if self.flattened_tree[current_id]["is_instance"]:
                 results.add(self.flattened_tree[current_id]["name"])
             for child_id in self.flattened_tree[current_id]["children"]:
-                _rec(child_id)
+                _rec(self.i2n(child_id))
 
-        _rec(start_id)
+        _rec(name)
         return results
 
     def expand_rect(self, name: str) -> list:
@@ -314,9 +331,7 @@ class Ontology:
                 axes = list(item)
                 for i, axis in enumerate(axes):
                     axes[i] = self.expand(axis)
-
-                for prod in product(*axes):
-                    results.update(prod)
+                results.update(set(product(*axes)))
             else:
                 results.add(item)
         return results
@@ -559,7 +574,7 @@ class Ontology:
     # これn項関係に一般化できるので将来的に拡張する
     def iota(self, relation: str, dom_value: str, index=0):
         """n項関係において、第index項目がdom_valueであるタプルのうち一意に定まるcodを取得する"""
-        relation_set = self.expand(relation)
+        relation_set = self.expand_rect(relation)
         results = []
         for rel in relation_set:
             dom = rel[index]
@@ -625,7 +640,7 @@ class PhonemeOntology(Ontology):
             },
         ]
 
-        # 写像
+        # (部分)写像
         map_config = [
             {
                 "name": "has_gesture_tiers",
