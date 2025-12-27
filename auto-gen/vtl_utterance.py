@@ -316,10 +316,11 @@ class VTLUtterance:
             baseline = block.get("baseline", {})
             tempo = float(baseline.get("tempo", 100))
             f0 = float(baseline.get("f0", 250))
+            melody = block.get("melody")
 
             if lang == "jp":
                 parser = JPParser()
-                segments = parser.parse_to_segments(content, tempo, f0)
+                segments = parser.parse_to_segments(content, tempo, f0, melody=melody)
                 self.segments.extend(segments)
             else:
                 print(f"Unsupported language: {lang}")
@@ -390,7 +391,7 @@ class VTLUtterance:
         self.save_seg(seg_file, data=tmp_segments)
 
         try:
-            with VocalTractLab() as vtl:
+            with VocalTractLab(speaker_file) as vtl:
                 vtl.seg_to_ges(seg_file, ges_file)
             print(f"Successfully converted to {ges_file}")
 
@@ -455,8 +456,8 @@ if __name__ == "__main__":
     # テストコード
     utterance = VTLUtterance()
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    ling_path = os.path.join(base_dir, "examples", "konnichiwa.ling")
-    wav_out_path = os.path.join(base_dir, "examples", "konnichiwa_out.wav")
+    ling_path = os.path.join(base_dir, "examples", "kaeru.ling")
+    wav_out_path = os.path.join(base_dir, "examples", "kaeru_out.wav")
 
     # スピーカーファイルのパス (環境に合わせて調整してください)
     speaker_path = os.path.join(

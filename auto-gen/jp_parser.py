@@ -20,13 +20,32 @@ class JPParser:
             print(f"Error loading {path}: {e}")
             return {}
 
-    def parse_to_segments(self, text, bpm, f0):
+    def parse_to_segments(self, text, bpm, f0, melody=None):
         """
         Parse Japanese text into segments with durations.
         """
         moras = self._parse_text_to_moras(text)
-        segments = self._generate_segments(moras, bpm, f0)
+        segments = self._generate_segments(moras, bpm, f0, melody=melody)
         return segments
+
+    def _note_to_freq(self, note):
+        if note == "R":
+            return None
+        notes = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+        match = re.match(r"([A-G]#?)(-?\d+)", note)
+        if not match:
+            return 440.0
+
+        name = match.group(1)
+        octave = int(match.group(2))
+
+        # MIDI note number: C-1 is 0. C4 is 60. A4 is 69.
+        # C is index 0.
+        note_idx = notes.index(name)
+        midi = note_idx + (octave + 1) * 12
+
+        freq = 440.0 * (2 ** ((midi - 69) / 12.0))
+        return freq
 
     def _parse_text_to_moras(self, text):
         """
@@ -98,13 +117,25 @@ class JPParser:
         return moras
 
     def _generate_segments(
-        self, moras, bpm, f0, pause_at_beginning=True, pause_at_end=True
+        self, moras, bpm, f0, melody=None, pause_at_beginning=True, pause_at_end=True
     ):
         """
         Convert moras to segments with durations.
         """
         duration_per_mora = 60.0 / bpm / 4  # mora1個は4分音符分とする
         segments = []
+
+        # Melody parsing
+        melody_freqs = []
+        if melody:
+            melody_notes = melody.split()
+            for note in melody_notes:
+                if note == "R":
+                    melody_freqs.append(None)
+                else:
+                    melody_freqs.append(self._note_to_freq(note))
+
+        global_content_mora_idx = 0
 
         # イントネーションパラメータ
         # フレーズごとに最高音(High)と最低音(Low)を一定にする
@@ -238,16 +269,25 @@ class JPParser:
                             duration_phs[i] = val
 
                 # Determine F0 for this mora
-                # フレーズ全体の下降 (Declination): 1モーラあたり -0.7 semitones
-                declination_st = -0.7 * content_mora_idx
-                baseline_f0 = f0 * np.power(2, declination_st / 12)
+                if melody_freqs:
+                    if global_content_mora_idx < len(melody_freqs):
+                        target_f0 = melody_freqs[global_content_mora_idx]
+                        if target_f0 is None:
+                            target_f0 = f0
+                    else:
+                        target_f0 = f0
+                    global_content_mora_idx += 1
+                else:
+                    # フレーズ全体の下降 (Declination): 1モーラあたり -0.7 semitones
+                    declination_st = -0.7 * content_mora_idx
+                    baseline_f0 = f0 * np.power(2, declination_st / 12)
 
-                # アクセントの重畳: Highなら +6.0 semitones
-                is_high = hl_pattern[content_mora_idx] == 1
-                accent_lift_st = 6.0 if is_high else 0.0
+                    # アクセントの重畳: Highなら +6.0 semitones
+                    is_high = hl_pattern[content_mora_idx] == 1
+                    accent_lift_st = 6.0 if is_high else 0.0
 
-                target_f0 = baseline_f0 * np.power(2, accent_lift_st / 12)
-                content_mora_idx += 1
+                    target_f0 = baseline_f0 * np.power(2, accent_lift_st / 12)
+                    content_mora_idx += 1
 
                 # 母音のみの音節が単語頭に来る場合、短いポーズを挿入
                 if (
